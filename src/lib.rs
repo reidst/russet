@@ -225,7 +225,7 @@ impl Kernel {
             plot(border, col, row + row_offset, text_color());
             plot(border, col + WINDOW_WIDTH, row + row_offset, text_color());
         }
-        let (file_count, filenames) = self.fs.list_directory();
+        let (file_count, filenames) = self.fs.list_directory().unwrap();
         let mut file_col_offset = 1;
         let mut file_row_offset = 1;
         for file in 0..file_count {
