@@ -15,7 +15,7 @@ pic8259 = "0.10"
 pc-keyboard = "0.5"
 pluggable_interrupt_os = "0.4"
 ramdisk = {git = "https://github.com/gjf2a/ramdisk"}
-#my_file_system_repo = {git = "https://github.com/my_userid/my_file_system_repo"}
+csci320-vsfs = {git = "https://github.com/reidst/csci320-vsfs"}
 simple_interp = {git = "https://github.com/gjf2a/simple_interp"}
 #my_heap_repo = {git = "https://github.com/my_userid/my_heap_repo"}
 

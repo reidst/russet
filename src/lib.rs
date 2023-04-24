@@ -1,10 +1,10 @@
 #![no_std]
 #![feature(prelude_2024)]
 
-// use file_system_solution::{FileSystem, FileSystemResult};
 use pc_keyboard::{DecodedKey, KeyCode};
 use pluggable_interrupt_os::vga_buffer::{BUFFER_WIDTH, BUFFER_HEIGHT, plot, ColorCode, Color, plot_str, is_drawable, plot_num};
 use ramdisk::RamDisk;
+use csci320_vsfs::FileSystem;
 use simple_interp::{Interpreter, InterpreterOutput, i64_into_buffer};
 // use gc_heap::CopyingHeap;
 
@@ -53,39 +53,48 @@ const MAX_HEAP_BLOCKS: usize = HEAP_SIZE;
 
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum KernelWindows { F1, F2, F3, F4 }
-impl KernelWindows {
+enum KWindows { F1, F2, F3, F4 }
+impl KWindows {
     fn col(&self) -> usize {
         match self {
-            KernelWindows::F1 => 0,
-            KernelWindows::F2 => MID_WIDTH - 1,
-            KernelWindows::F3 => 0,
-            KernelWindows::F4 => MID_WIDTH - 1,
+            KWindows::F1 => 0,
+            KWindows::F2 => MID_WIDTH - 1,
+            KWindows::F3 => 0,
+            KWindows::F4 => MID_WIDTH - 1,
         }
     }
     fn row(&self) -> usize {
         match self {
-            KernelWindows::F1 => FIRST_BORDER_ROW,
-            KernelWindows::F2 => FIRST_BORDER_ROW,
-            KernelWindows::F3 => MID_HEIGHT,
-            KernelWindows::F4 => MID_HEIGHT,
+            KWindows::F1 => FIRST_BORDER_ROW,
+            KWindows::F2 => FIRST_BORDER_ROW,
+            KWindows::F3 => MID_HEIGHT,
+            KWindows::F4 => MID_HEIGHT,
         }
     }
     fn name(&self) -> &str {
         match self {
-            KernelWindows::F1 => "F1",
-            KernelWindows::F2 => "F2",
-            KernelWindows::F3 => "F3",
-            KernelWindows::F4 => "F4",
+            KWindows::F1 => "F1",
+            KWindows::F2 => "F2",
+            KWindows::F3 => "F3",
+            KWindows::F4 => "F4",
         }
     }
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum KernelSelection { Window(KernelWindows), Filebar }
+enum KSelection { Window(KWindows), Filebar }
 
 pub struct Kernel {
-    selected: KernelSelection,
+    selected: KSelection,
+    fs: FileSystem<
+        MAX_OPEN, 
+        BLOCK_SIZE, 
+        NUM_BLOCKS, 
+        MAX_FILE_BLOCKS, 
+        MAX_FILE_BYTES, 
+        MAX_FILES_STORED, 
+        MAX_FILENAME_BYTES
+    >,
 }
 
 const HELLO: &str = r#"print("Hello, world!")"#;
@@ -133,7 +142,6 @@ while (i < terms) {
 }
 print((4 * sum))"#;
 
-/*
 // Seed the disk with some programs.
 fn initial_files(disk: &mut FileSystem<MAX_OPEN, BLOCK_SIZE, NUM_BLOCKS, MAX_FILE_BLOCKS, MAX_FILE_BYTES, MAX_FILES_STORED, MAX_FILENAME_BYTES>) {
     for (filename, contents) in [
@@ -141,9 +149,7 @@ fn initial_files(disk: &mut FileSystem<MAX_OPEN, BLOCK_SIZE, NUM_BLOCKS, MAX_FIL
         ("nums", NUMS),
         ("add_one", ADD_ONE),
         ("countdown", COUNTDOWN),
-        ("average", AVERAGE),        for win in [KernelWindows::F1, KernelWindows::F2, KernelWindows::F3, KernelWindows::F4] {
-        }
-
+        ("average", AVERAGE),
         ("pi", PI),
     ] {
         let fd = disk.open_create(filename).unwrap();
@@ -151,11 +157,24 @@ fn initial_files(disk: &mut FileSystem<MAX_OPEN, BLOCK_SIZE, NUM_BLOCKS, MAX_FIL
         disk.close(fd);
     }
 }
-*/
 
 impl Kernel {
     pub fn new() -> Self {
-        Self { selected: KernelSelection::Window(KernelWindows::F3) }
+        let mut fs: FileSystem<
+            MAX_OPEN, 
+            BLOCK_SIZE, 
+            NUM_BLOCKS, 
+            MAX_FILE_BLOCKS, 
+            MAX_FILE_BYTES, 
+            MAX_FILES_STORED, 
+            MAX_FILENAME_BYTES
+        > = FileSystem::new(ramdisk::RamDisk::new());
+        initial_files(&mut fs);
+        
+        Self {
+            selected: KSelection::Window(KWindows::F1),
+            fs
+        }
     }
 
     pub fn key(&mut self, key: DecodedKey) {
@@ -168,11 +187,11 @@ impl Kernel {
 
     fn handle_raw(&mut self, key: KeyCode) {
         match key {
-            KeyCode::F1 => self.selected = KernelSelection::Window(KernelWindows::F1),
-            KeyCode::F2 => self.selected = KernelSelection::Window(KernelWindows::F2),
-            KeyCode::F3 => self.selected = KernelSelection::Window(KernelWindows::F3),
-            KeyCode::F4 => self.selected = KernelSelection::Window(KernelWindows::F4),
-            KeyCode::F5 => self.selected = KernelSelection::Filebar,
+            KeyCode::F1 => self.selected = KSelection::Window(KWindows::F1),
+            KeyCode::F2 => self.selected = KSelection::Window(KWindows::F2),
+            KeyCode::F3 => self.selected = KSelection::Window(KWindows::F3),
+            KeyCode::F4 => self.selected = KSelection::Window(KWindows::F4),
+            KeyCode::F5 => self.selected = KSelection::Filebar,
             _ => {}
         }
     }
@@ -183,7 +202,7 @@ impl Kernel {
 
     pub fn draw(&mut self) {
         plot_str(FILENAME_PROMPT, 0, 0, text_color());
-        for win in [KernelWindows::F1, KernelWindows::F2, KernelWindows::F3, KernelWindows::F4] {
+        for win in [KWindows::F1, KWindows::F2, KWindows::F3, KWindows::F4] {
             self.draw_window_via_wincode(win);
             plot_str(win.name(), win.col() + WINDOW_LABEL_COL_OFFSET, win.row(), text_color());
         }
@@ -206,10 +225,24 @@ impl Kernel {
             plot(border, col, row + row_offset, text_color());
             plot(border, col + WINDOW_WIDTH, row + row_offset, text_color());
         }
+        let (file_count, filenames) = self.fs.list_directory();
+        let mut file_col_offset = 1;
+        let mut file_row_offset = 1;
+        for file in 0..file_count {
+            let filename_bytes = filenames[file];
+            for byte in filename_bytes {
+                plot(byte as char, col + file_col_offset, row + file_row_offset, text_color());
+            }
+            file_col_offset += MAX_FILENAME_BYTES;
+            if file_col_offset > 3 * MAX_FILENAME_BYTES {
+                file_col_offset = 1;
+                file_row_offset += 1;
+            }
+        }
     }
 
-    fn draw_window_via_wincode(&mut self, window: KernelWindows) {
-        let border = if let KernelSelection::Window(selected_win) = self.selected {
+    fn draw_window_via_wincode(&mut self, window: KWindows) {
+        let border = if let KSelection::Window(selected_win) = self.selected {
             if selected_win == window {'*'} else {'.'}
         } else {'.'};
         self.draw_window_offset(window.col(), window.row(), border);
