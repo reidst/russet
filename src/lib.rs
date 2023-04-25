@@ -84,8 +84,46 @@ impl KWindows {
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum KSelection { Window(KWindows), Filebar }
 
+struct TypingBuffer<const MAX_LENGTH: usize> {
+    buffer: [u8; MAX_LENGTH],
+    cursor: usize,
+}
+
+impl TypingBuffer<MAX_FILENAME_BYTES> {
+    fn type_char(&mut self, c: char) {
+        if self.cursor < MAX_FILENAME_BYTES {
+            self.buffer[self.cursor] = c as u8;
+            self.cursor += 1;
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.buffer[self.cursor - 1] = 0;
+            self.cursor -= 1;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buffer = [0; MAX_FILENAME_BYTES];
+        self.cursor = 0;
+    }
+
+    fn draw(&self, col: usize, row: usize, color: ColorCode) {
+        for i in 0..MAX_FILENAME_BYTES {
+            let char_to_plot = if i < self.cursor {
+                self.buffer[i] as char
+            } else {
+                ' '
+            };
+            plot(char_to_plot, col + i, row, color);
+        }
+    }
+}
+
 pub struct Kernel {
     selected: KSelection,
+    filebar_buffer: TypingBuffer<MAX_FILENAME_BYTES>,
     fs: FileSystem<
         MAX_OPEN, 
         BLOCK_SIZE, 
@@ -170,9 +208,14 @@ impl Kernel {
             MAX_FILENAME_BYTES
         > = FileSystem::new(ramdisk::RamDisk::new());
         initial_files(&mut fs);
+        let filebar_buffer = TypingBuffer {
+            buffer: [0u8; MAX_FILENAME_BYTES],
+            cursor: 0,
+        };
         
         Self {
             selected: KSelection::Window(KWindows::F1),
+            filebar_buffer,
             fs
         }
     }
@@ -197,11 +240,23 @@ impl Kernel {
     }
 
     fn handle_unicode(&mut self, key: char) {
-        // todo!("handle printable keys");
+        match self.selected {
+            KSelection::Filebar => {
+                match key {
+                    '\u{8}' => {
+                        self.filebar_buffer.backspace();
+                    },
+                    other if is_drawable(other) => self.filebar_buffer.type_char(other),
+                    _ => {},
+                }
+            },
+            _ => {},
+        }
     }
 
     pub fn draw(&mut self) {
         plot_str(FILENAME_PROMPT, 0, 0, text_color());
+        self.filebar_buffer.draw(FILENAME_PROMPT.len(), 0, text_color());
         for win in [KWindows::F1, KWindows::F2, KWindows::F3, KWindows::F4] {
             self.draw_window_via_wincode(win);
             plot_str(win.name(), win.col() + WINDOW_LABEL_COL_OFFSET, win.row(), text_color());
@@ -246,6 +301,10 @@ impl Kernel {
             if selected_win == window {'*'} else {'.'}
         } else {'.'};
         self.draw_window_offset(window.col(), window.row(), border);
+    }
+
+    fn type_in_filebar(&mut self, key: char) {
+
     }
 }
 
