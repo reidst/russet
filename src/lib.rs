@@ -15,6 +15,7 @@ use core::prelude::rust_2024::derive;
 use core::clone::Clone;
 use core::cmp::{PartialEq,Eq};
 use core::marker::Copy;
+use core::str;
 
 const FIRST_BORDER_ROW: usize = 1;
 const LAST_BORDER_ROW: usize = BUFFER_HEIGHT - 1;
@@ -111,13 +112,13 @@ impl TypingBuffer<MAX_FILENAME_BYTES> {
 
     fn draw(&self, col: usize, row: usize, color: ColorCode) {
         for i in 0..MAX_FILENAME_BYTES {
-            let char_to_plot = if i < self.cursor {
-                self.buffer[i] as char
-            } else {
-                ' '
-            };
+            let char_to_plot = if i < self.cursor { self.buffer[i] as char } else { ' ' };
             plot(char_to_plot, col + i, row, color);
         }
+    }
+
+    fn get_bytes(&mut self) -> (usize, [u8; MAX_FILENAME_BYTES]) {
+        (self.cursor, self.buffer.clone())
     }
 }
 
@@ -243,9 +244,8 @@ impl Kernel {
         match self.selected {
             KSelection::Filebar => {
                 match key {
-                    '\u{8}' => {
-                        self.filebar_buffer.backspace();
-                    },
+                    '\u{8}' => self.filebar_buffer.backspace(),
+                    '\n' => self.try_create_file(),
                     other if is_drawable(other) => self.filebar_buffer.type_char(other),
                     _ => {},
                 }
@@ -303,8 +303,12 @@ impl Kernel {
         self.draw_window_offset(window.col(), window.row(), border);
     }
 
-    fn type_in_filebar(&mut self, key: char) {
-
+    fn try_create_file(&mut self) {
+        let (name_len, name_bytes) = self.filebar_buffer.get_bytes();
+        self.filebar_buffer.clear();
+        if let Ok(str) = str::from_utf8(&name_bytes[0..name_len]) {
+            self.fs.open_create(str);
+        }
     }
 }
 
