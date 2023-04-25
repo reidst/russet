@@ -232,8 +232,8 @@ impl Kernel {
             let filename_bytes = filenames[file];
             for byte in filename_bytes {
                 plot(byte as char, col + file_col_offset, row + file_row_offset, text_color());
+                file_col_offset += 1;
             }
-            file_col_offset += MAX_FILENAME_BYTES;
             if file_col_offset > 3 * MAX_FILENAME_BYTES {
                 file_col_offset = 1;
                 file_row_offset += 1;
