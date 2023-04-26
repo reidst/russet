@@ -55,6 +55,7 @@ const MAX_HEAP_BLOCKS: usize = HEAP_SIZE;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum KWindows { F1, F2, F3, F4 }
+
 impl KWindows {
     fn col(&self) -> usize {
         match self {
@@ -79,6 +80,39 @@ impl KWindows {
             KWindows::F3 => "F3",
             KWindows::F4 => "F4",
         }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+struct DirectoryState {
+    cursor: usize,
+}
+
+impl DirectoryState {
+    fn move_cursor(&mut self, delta: isize, file_count: usize) {
+        let new_pos = self.cursor as isize + delta;
+        if new_pos >= 0 && new_pos < file_count as isize {
+            self.cursor = new_pos as usize;
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+struct EditingState;
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum KWindowMode {
+    Directory(DirectoryState),
+    Editing(EditingState),
+}
+
+impl KWindowMode {
+    fn directory(cursor: usize) -> Self {
+        Self::Directory(DirectoryState { cursor })
+    }
+
+    fn editing() -> Self {
+        Self::Editing(EditingState)
     }
 }
 
@@ -125,6 +159,7 @@ impl TypingBuffer<MAX_FILENAME_BYTES> {
 pub struct Kernel {
     selected: KSelection,
     filebar_buffer: TypingBuffer<MAX_FILENAME_BYTES>,
+    window_modes: [KWindowMode; 4],
     fs: FileSystem<
         MAX_OPEN, 
         BLOCK_SIZE, 
@@ -217,6 +252,7 @@ impl Kernel {
         Self {
             selected: KSelection::Window(KWindows::F1),
             filebar_buffer,
+            window_modes: [KWindowMode::directory(0); 4],
             fs
         }
     }
@@ -236,6 +272,15 @@ impl Kernel {
             KeyCode::F3 => self.selected = KSelection::Window(KWindows::F3),
             KeyCode::F4 => self.selected = KSelection::Window(KWindows::F4),
             KeyCode::F5 => self.selected = KSelection::Filebar,
+            KeyCode::F6 => {
+                if let KSelection::Window(window) = self.selected {
+                    self.set_window_mode(window, KWindowMode::directory(0));
+                }
+            },
+            KeyCode::ArrowUp    => self.move_cursor(-3),
+            KeyCode::ArrowDown  => self.move_cursor(3),
+            KeyCode::ArrowLeft  => self.move_cursor(-1),
+            KeyCode::ArrowRight => self.move_cursor(1),
             _ => {}
         }
     }
@@ -250,7 +295,12 @@ impl Kernel {
                     _ => {},
                 }
             },
-            _ => {},
+            KSelection::Window(window) => {
+                match key {
+                    'e' => self.set_window_mode(window, KWindowMode::editing()),
+                    _ => {},
+                }
+            },
         }
     }
 
@@ -258,7 +308,7 @@ impl Kernel {
         plot_str(FILENAME_PROMPT, 0, 0, text_color());
         self.filebar_buffer.draw(FILENAME_PROMPT.len(), 0, text_color());
         for win in [KWindows::F1, KWindows::F2, KWindows::F3, KWindows::F4] {
-            self.draw_window_via_wincode(win);
+            self.draw_window(win);
             plot_str(win.name(), win.col() + WINDOW_LABEL_COL_OFFSET, win.row(), text_color());
         }
     }
@@ -271,7 +321,49 @@ impl Kernel {
         // todo!("Run an instruction in a process");
     }
 
-    fn draw_window_offset(&mut self, col: usize, row: usize, border: char) {
+    fn draw_window(&mut self, window: KWindows) {
+        self.clear_window(window);
+        self.draw_window_border(window);
+        let col = window.col();
+        let row = window.row();
+        match self.get_window_mode(window) {
+            KWindowMode::Directory(dir_state) => {
+                let (file_count, filenames) = self.fs.list_directory().unwrap();
+                let mut file_col_offset = 1;
+                let mut file_row_offset = 1;
+                for file in 0..file_count {
+                    let filename_bytes = filenames[file];
+                    for byte in filename_bytes {
+                        let color = if file == dir_state.cursor { highlight_color() } else { text_color() };
+                        plot(byte as char, col + file_col_offset, row + file_row_offset, color);
+                        file_col_offset += 1;
+                    }
+                    if file_col_offset > 3 * MAX_FILENAME_BYTES {
+                        file_col_offset = 1;
+                        file_row_offset += 1;
+                    }
+                }
+            },
+            KWindowMode::Editing(_) => {
+                plot('E', col + 9, row + 5, text_color());
+                plot('D', col + 12, row + 4, text_color());
+                plot('I', col + 15, row + 3, text_color());
+                plot('T', col + 18, row + 2, text_color());
+
+                plot('M', col + 13, row + 8, text_color());
+                plot('O', col + 16, row + 7, text_color());
+                plot('D', col + 19, row + 6, text_color());
+                plot('E', col + 22, row + 5, text_color());
+            },
+        }
+    }
+
+    fn draw_window_border(&mut self, window: KWindows) {
+        let col = window.col();
+        let row = window.row();
+        let border = if let KSelection::Window(selected_win) = self.selected {
+            if selected_win == window {'*'} else {'.'}
+        } else {'.'};
         for col_offset in 0..=WINDOW_WIDTH {
             plot(border, col + col_offset, row, text_color());
             plot(border, col + col_offset, row + WINDOW_HEIGHT, text_color());
@@ -280,27 +372,16 @@ impl Kernel {
             plot(border, col, row + row_offset, text_color());
             plot(border, col + WINDOW_WIDTH, row + row_offset, text_color());
         }
-        let (file_count, filenames) = self.fs.list_directory().unwrap();
-        let mut file_col_offset = 1;
-        let mut file_row_offset = 1;
-        for file in 0..file_count {
-            let filename_bytes = filenames[file];
-            for byte in filename_bytes {
-                plot(byte as char, col + file_col_offset, row + file_row_offset, text_color());
-                file_col_offset += 1;
-            }
-            if file_col_offset > 3 * MAX_FILENAME_BYTES {
-                file_col_offset = 1;
-                file_row_offset += 1;
-            }
-        }
     }
 
-    fn draw_window_via_wincode(&mut self, window: KWindows) {
-        let border = if let KSelection::Window(selected_win) = self.selected {
-            if selected_win == window {'*'} else {'.'}
-        } else {'.'};
-        self.draw_window_offset(window.col(), window.row(), border);
+    fn clear_window(&mut self, window: KWindows) {
+        let col = window.col();
+        let row = window.row();
+        for col_offset in 1..WINDOW_WIDTH {
+            for row_offset in 1..WINDOW_HEIGHT {
+                plot(' ', col + col_offset, row + row_offset, text_color());
+            }
+        }
     }
 
     fn try_create_file(&mut self) {
@@ -308,6 +389,35 @@ impl Kernel {
         self.filebar_buffer.clear();
         if let Ok(str) = str::from_utf8(&name_bytes[0..name_len]) {
             self.fs.open_create(str);
+        }
+    }
+
+    fn get_window_mode(&self, window: KWindows) -> KWindowMode {
+        match window {
+            KWindows::F1 => self.window_modes[0],
+            KWindows::F2 => self.window_modes[1],
+            KWindows::F3 => self.window_modes[2],
+            KWindows::F4 => self.window_modes[3],
+        }
+    }
+
+    fn set_window_mode(&mut self, window: KWindows, mode: KWindowMode) {
+        let index = match window {
+            KWindows::F1 => 0,
+            KWindows::F2 => 1,
+            KWindows::F3 => 2,
+            KWindows::F4 => 3,
+        };
+        self.window_modes[index] = mode;
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        if let KSelection::Window(window) = self.selected {
+            if let KWindowMode::Directory(mut dir_state) = self.get_window_mode(window) {
+                let (file_count, _) = self.fs.list_directory().unwrap();
+                dir_state.move_cursor(delta, file_count);
+                self.set_window_mode(window, KWindowMode::Directory(dir_state));
+            }
         }
     }
 }
@@ -319,4 +429,3 @@ fn text_color() -> ColorCode {
 fn highlight_color() -> ColorCode {
     ColorCode::new(Color::Black, Color::White)
 }
-
