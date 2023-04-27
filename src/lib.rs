@@ -1,9 +1,11 @@
 #![no_std]
 #![feature(prelude_2024)]
 
+// TODO: use proper error handling rather than `.unwrap()` during file management
+
 use pc_keyboard::{DecodedKey, KeyCode};
+use pluggable_interrupt_os::println;
 use pluggable_interrupt_os::vga_buffer::{BUFFER_WIDTH, BUFFER_HEIGHT, plot, ColorCode, Color, plot_str, is_drawable, plot_num};
-use ramdisk::RamDisk;
 use csci320_vsfs::FileSystem;
 use simple_interp::{Interpreter, InterpreterOutput, i64_into_buffer};
 // use gc_heap::CopyingHeap;
@@ -28,6 +30,7 @@ const MID_WIDTH: usize = WINDOWS_WIDTH / 2;
 const MID_HEIGHT: usize = BUFFER_HEIGHT / 2;
 const NUM_WINDOWS: usize = 4;
 const WINDOW_LABEL_COL_OFFSET: usize = WINDOW_WIDTH - 3;
+const FILENAME_LABEL_COL_OFFSET: usize = 2;
 
 const FILENAME_PROMPT: &str = "F5 - Filename: ";
 
@@ -38,6 +41,8 @@ const MAX_FILE_BLOCKS: usize = 64;
 const MAX_FILE_BYTES: usize = MAX_FILE_BLOCKS * BLOCK_SIZE;
 const MAX_FILES_STORED: usize = 30;
 const MAX_FILENAME_BYTES: usize = 10;
+
+const PRACTICAL_FILE_BUFFER_SIZE: usize = MAX_FILE_BYTES - 1;  // i made an oopsie in vsfs
 
 const MAX_TOKENS: usize = 500;
 const MAX_LITERAL_CHARS: usize = 30;
@@ -98,7 +103,57 @@ impl DirectoryState {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-struct EditingState;
+struct EditingState {
+    filename: [u8; MAX_FILENAME_BYTES],
+    buffer: [u8; PRACTICAL_FILE_BUFFER_SIZE],
+    cursor: usize,
+    directory_index: usize,
+}
+
+impl EditingState {
+    fn write(&mut self, data: &[u8]) {
+        let mut data_cursor = 0;
+        while self.cursor < PRACTICAL_FILE_BUFFER_SIZE && data_cursor < data.len() {
+            self.buffer[self.cursor] = data[data_cursor];
+            self.cursor += 1;
+            data_cursor += 1;
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.buffer[self.cursor] = 0;
+        }
+    }
+
+    fn type_char(&mut self, c: char) {
+        if self.cursor < PRACTICAL_FILE_BUFFER_SIZE {
+            self.buffer[self.cursor] = c as u8;
+            self.cursor += 1;
+        }
+    }
+
+    fn read_line(&self, line: usize) -> [u8; WINDOW_WIDTH] { // TODO: fix this method
+        let mut line_buf = [' ' as u8; WINDOW_WIDTH];
+        let mut line_counter = 0;
+        let mut line_cursor = 0;
+        for (i, &byte) in self.buffer.iter().enumerate() {
+            if line_counter == line { break }
+            if i - line_cursor == WINDOW_WIDTH || byte == '\n' as u8 {
+                line_counter += 1;
+                line_cursor = i
+            }
+        }
+        if line_counter == line {
+            for i in 0..WINDOW_WIDTH {
+                if self.buffer[line_counter] == '\n' as u8 { break }
+                line_buf[i] = self.buffer[line_counter];
+            }
+        }
+        line_buf
+    }
+}
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum KWindowMode {
@@ -111,8 +166,12 @@ impl KWindowMode {
         Self::Directory(DirectoryState { cursor })
     }
 
-    fn editing() -> Self {
-        Self::Editing(EditingState)
+    fn editing(
+        filename: [u8; MAX_FILENAME_BYTES],
+        buffer: [u8; PRACTICAL_FILE_BUFFER_SIZE],
+        directory_index: usize,
+    ) -> Self {
+        Self::Editing(EditingState { filename, buffer, cursor: 0, directory_index })
     }
 }
 
@@ -252,7 +311,7 @@ impl Kernel {
         Self {
             selected: KSelection::Window(KWindows::F1),
             filebar_buffer,
-            window_modes: [KWindowMode::directory(0); 4],
+            window_modes: [KWindowMode::directory(0); NUM_WINDOWS],
             fs
         }
     }
@@ -274,7 +333,7 @@ impl Kernel {
             KeyCode::F5 => self.selected = KSelection::Filebar,
             KeyCode::F6 => {
                 if let KSelection::Window(window) = self.selected {
-                    self.set_window_mode(window, KWindowMode::directory(0));
+                    self.switch_to_directory_mode(window);
                 }
             },
             KeyCode::ArrowUp    => self.move_cursor(-3),
@@ -297,7 +356,7 @@ impl Kernel {
             },
             KSelection::Window(window) => {
                 match key {
-                    'e' => self.set_window_mode(window, KWindowMode::editing()),
+                    'e' => self.switch_to_edit_mode(window),
                     _ => {},
                 }
             },
@@ -307,9 +366,19 @@ impl Kernel {
     pub fn draw(&mut self) {
         plot_str(FILENAME_PROMPT, 0, 0, text_color());
         self.filebar_buffer.draw(FILENAME_PROMPT.len(), 0, text_color());
-        for win in [KWindows::F1, KWindows::F2, KWindows::F3, KWindows::F4] {
-            self.draw_window(win);
-            plot_str(win.name(), win.col() + WINDOW_LABEL_COL_OFFSET, win.row(), text_color());
+        for window in [KWindows::F1, KWindows::F2, KWindows::F3, KWindows::F4] {
+            self.draw_window(window);
+        }
+        if let KSelection::Window(window) = self.selected {
+            self.draw_window(window)
+        }
+        for window in [KWindows::F1, KWindows::F2, KWindows::F3, KWindows::F4] {
+            plot_str(
+                window.name(),
+                window.col() + WINDOW_LABEL_COL_OFFSET,
+                window.row(),
+                text_color(),
+            );
         }
     }
 
@@ -344,16 +413,24 @@ impl Kernel {
                     }
                 }
             },
-            KWindowMode::Editing(_) => {
-                plot('E', col + 9, row + 5, text_color());
-                plot('D', col + 12, row + 4, text_color());
-                plot('I', col + 15, row + 3, text_color());
-                plot('T', col + 18, row + 2, text_color());
-
-                plot('M', col + 13, row + 8, text_color());
-                plot('O', col + 16, row + 7, text_color());
-                plot('D', col + 19, row + 6, text_color());
-                plot('E', col + 22, row + 5, text_color());
+            KWindowMode::Editing(edit_state) => {
+                let header = "(F6)";
+                plot_str(header, col + FILENAME_LABEL_COL_OFFSET, row, text_color());
+                for i in 0..edit_state.filename.len() {
+                    if edit_state.filename[i] == 0 { continue }
+                    plot(
+                        edit_state.filename[i] as char,
+                        col + i + header.len() + FILENAME_LABEL_COL_OFFSET,
+                        row,
+                        text_color()
+                    );
+                }
+                for line in 0..WINDOW_HEIGHT {
+                    let line_bytes = edit_state.read_line(line);
+                    let line_str = str::from_utf8(&line_bytes).unwrap();
+                    panic!("the first line is {line_str}");
+                    plot_str(line_str, 1, line + 1, text_color());
+                }
             },
         }
     }
@@ -364,21 +441,21 @@ impl Kernel {
         let border = if let KSelection::Window(selected_win) = self.selected {
             if selected_win == window {'*'} else {'.'}
         } else {'.'};
-        for col_offset in 0..=WINDOW_WIDTH {
+        for col_offset in 0..WINDOW_WIDTH+2 {
             plot(border, col + col_offset, row, text_color());
-            plot(border, col + col_offset, row + WINDOW_HEIGHT, text_color());
+            plot(border, col + col_offset, row + WINDOW_HEIGHT+1, text_color());
         }
-        for row_offset in 0..=WINDOW_HEIGHT {
+        for row_offset in 0..WINDOW_HEIGHT+2 {
             plot(border, col, row + row_offset, text_color());
-            plot(border, col + WINDOW_WIDTH, row + row_offset, text_color());
+            plot(border, col + WINDOW_WIDTH+1, row + row_offset, text_color());
         }
     }
 
     fn clear_window(&mut self, window: KWindows) {
         let col = window.col();
         let row = window.row();
-        for col_offset in 1..WINDOW_WIDTH {
-            for row_offset in 1..WINDOW_HEIGHT {
+        for col_offset in 1..WINDOW_WIDTH+1 {
+            for row_offset in 1..WINDOW_HEIGHT+1 {
                 plot(' ', col + col_offset, row + row_offset, text_color());
             }
         }
@@ -388,7 +465,8 @@ impl Kernel {
         let (name_len, name_bytes) = self.filebar_buffer.get_bytes();
         self.filebar_buffer.clear();
         if let Ok(str) = str::from_utf8(&name_bytes[0..name_len]) {
-            self.fs.open_create(str);
+            let new_file = self.fs.open_create(str).unwrap();
+            self.fs.close(new_file).unwrap();
         }
     }
 
@@ -418,6 +496,37 @@ impl Kernel {
                 dir_state.move_cursor(delta, file_count);
                 self.set_window_mode(window, KWindowMode::Directory(dir_state));
             }
+        }
+    }
+
+    fn switch_to_edit_mode(&mut self, window: KWindows) {
+        if let KWindowMode::Directory(dir_state) = self.get_window_mode(window) {
+            let chosen_file = dir_state.cursor;
+            let (_, directory) = self.fs.list_directory().unwrap();
+            let filename_str = str::from_utf8(&directory[chosen_file]).unwrap();
+            let file = self.fs.open_read(filename_str).unwrap();
+            let mut buffer = [0u8; PRACTICAL_FILE_BUFFER_SIZE];
+            self.fs.read(file, &mut buffer).unwrap();
+            self.fs.close(file);
+            self.set_window_mode(
+                window,
+                KWindowMode::editing(directory[chosen_file], buffer, chosen_file),
+            );
+        }
+    }
+
+    fn switch_to_directory_mode(&mut self, window: KWindows) {
+        if let KWindowMode::Editing(edit_state) = self.get_window_mode(window) {
+            let filename_str = str::from_utf8(&edit_state.filename).unwrap();
+            let file = self.fs.open_create(filename_str).unwrap();
+            self.fs.close(file).unwrap();
+            let file = self.fs.open_create(filename_str).unwrap();
+            self.fs.write(file, &edit_state.buffer).unwrap();
+            self.fs.close(file).unwrap();
+            self.set_window_mode(
+                window,
+                KWindowMode::directory(edit_state.directory_index),
+            );
         }
     }
 }
