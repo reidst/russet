@@ -4,7 +4,6 @@
 // TODO: use proper error handling rather than `.unwrap()` during file management
 
 use pc_keyboard::{DecodedKey, KeyCode};
-use pluggable_interrupt_os::println;
 use pluggable_interrupt_os::vga_buffer::{BUFFER_WIDTH, BUFFER_HEIGHT, plot, ColorCode, Color, plot_str, is_drawable, plot_num};
 use csci320_vsfs::FileSystem;
 use simple_interp::{Interpreter, InterpreterOutput, i64_into_buffer};
@@ -112,16 +111,6 @@ struct EditingState {
 }
 
 impl EditingState {
-    fn write(&mut self, data: &[u8]) {
-        let mut data_cursor = 0;
-        while self.cursor < PRACTICAL_FILE_BUFFER_SIZE && data_cursor < data.len() {
-            self.buffer[self.cursor] = data[data_cursor];
-            self.cursor += 1;
-            self.len += 1;
-            data_cursor += 1;
-        }
-    }
-
     fn backspace(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
@@ -220,7 +209,7 @@ impl KWindowMode {
             filename,
             buffer,
             len,
-            cursor: 0,
+            cursor: len,
             directory_index,
         })
     }
@@ -387,10 +376,10 @@ impl Kernel {
                     self.switch_to_directory_mode(window);
                 }
             },
-            KeyCode::ArrowUp    => self.move_cursor(-3),
-            KeyCode::ArrowDown  => self.move_cursor(3),
-            KeyCode::ArrowLeft  => self.move_cursor(-1),
-            KeyCode::ArrowRight => self.move_cursor(1),
+            KeyCode::ArrowUp    => self.move_dir_cursor(-3),
+            KeyCode::ArrowDown  => self.move_dir_cursor(3),
+            KeyCode::ArrowLeft  => self.move_dir_cursor(-1),
+            KeyCode::ArrowRight => self.move_dir_cursor(1),
             _ => {}
         }
     }
@@ -406,9 +395,21 @@ impl Kernel {
                 }
             },
             KSelection::Window(window) => {
-                match key {
-                    'e' => self.switch_to_edit_mode(window),
-                    _ => {},
+                match self.get_window_mode(window) {
+                    KWindowMode::Directory(_) => {
+                        match key {
+                            'e' => self.switch_to_edit_mode(window),
+                            _ => {},
+                        }
+                    },
+                    KWindowMode::Editing(mut edit_state) => {
+                        match key {
+                            key if is_drawable(key) => edit_state.type_char(key),
+                            '\u{8}' => edit_state.backspace(),
+                            _ => {},
+                        }
+                        self.set_window_mode(window, KWindowMode::Editing(edit_state));
+                    }
                 }
             },
         }
@@ -545,7 +546,7 @@ impl Kernel {
         self.window_modes[index] = mode;
     }
 
-    fn move_cursor(&mut self, delta: isize) {
+    fn move_dir_cursor(&mut self, delta: isize) {
         if let KSelection::Window(window) = self.selected {
             if let KWindowMode::Directory(mut dir_state) = self.get_window_mode(window) {
                 let (file_count, _) = self.fs.list_directory().unwrap();
