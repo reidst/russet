@@ -106,6 +106,7 @@ impl DirectoryState {
 struct EditingState {
     filename: [u8; MAX_FILENAME_BYTES],
     buffer: [u8; PRACTICAL_FILE_BUFFER_SIZE],
+    len: usize,
     cursor: usize,
     directory_index: usize,
 }
@@ -116,6 +117,7 @@ impl EditingState {
         while self.cursor < PRACTICAL_FILE_BUFFER_SIZE && data_cursor < data.len() {
             self.buffer[self.cursor] = data[data_cursor];
             self.cursor += 1;
+            self.len += 1;
             data_cursor += 1;
         }
     }
@@ -124,6 +126,7 @@ impl EditingState {
         if self.cursor > 0 {
             self.cursor -= 1;
             self.buffer[self.cursor] = 0;
+            self.len -= 1;
         }
     }
 
@@ -131,27 +134,68 @@ impl EditingState {
         if self.cursor < PRACTICAL_FILE_BUFFER_SIZE {
             self.buffer[self.cursor] = c as u8;
             self.cursor += 1;
+            self.len += 1;
         }
     }
 
-    fn read_line(&self, line: usize) -> [u8; WINDOW_WIDTH] { // TODO: fix this method
+    fn line_count(&self, line_width: usize) -> usize {
+        let mut count = 1;
+        let mut cursor = 0;
+        let mut len = 0;
+        loop {
+            let &this_byte = match self.buffer.get(cursor) {
+                Some(byte) if byte == &0 => break,
+                Some(byte) => byte,
+                None => break,
+            };
+            if this_byte == '\n' as u8 {
+                count += 1;
+                cursor += 2;
+                len = 0;
+            } else if len == line_width {
+                count += 1;
+                cursor += 1;
+                len = 0;
+            } else {
+                cursor += 1;
+                len += 1;
+            }
+        }
+        count
+    }
+
+    fn read_line(&self, line: usize) -> Option<[u8; WINDOW_WIDTH]> { // TODO: fix this method
         let mut line_buf = [' ' as u8; WINDOW_WIDTH];
-        let mut line_counter = 0;
-        let mut line_cursor = 0;
-        for (i, &byte) in self.buffer.iter().enumerate() {
-            if line_counter == line { break }
-            if i - line_cursor == WINDOW_WIDTH || byte == '\n' as u8 {
-                line_counter += 1;
-                line_cursor = i
+        let mut current_line = 0;
+        let mut line_start = 0;
+        let mut line_len = 0;
+        loop {
+            if current_line > line { break }
+            let &this_byte = match self.buffer.get(line_start + line_len) {
+                Some(byte) => byte,
+                None => break,
+            };
+            if this_byte == '\n' as u8 {
+                current_line += 1;
+                line_start += line_len + 1;
+                line_len = 0;
+            } else if line_len == WINDOW_WIDTH {
+                current_line += 1;
+                line_start += line_len;
+                line_len = 0;
+            } else {
+                if current_line == line {
+                    line_buf[line_len] = this_byte;
+                }
+                line_len += 1;
             }
         }
-        if line_counter == line {
-            for i in 0..WINDOW_WIDTH {
-                if self.buffer[line_counter] == '\n' as u8 { break }
-                line_buf[i] = self.buffer[line_counter];
-            }
+
+        if current_line > line {
+            Some(line_buf)
+        } else {
+            None
         }
-        line_buf
     }
 }
 
@@ -169,9 +213,16 @@ impl KWindowMode {
     fn editing(
         filename: [u8; MAX_FILENAME_BYTES],
         buffer: [u8; PRACTICAL_FILE_BUFFER_SIZE],
+        len: usize,
         directory_index: usize,
     ) -> Self {
-        Self::Editing(EditingState { filename, buffer, cursor: 0, directory_index })
+        Self::Editing(EditingState {
+            filename,
+            buffer,
+            len,
+            cursor: 0,
+            directory_index,
+        })
     }
 }
 
@@ -425,11 +476,16 @@ impl Kernel {
                         text_color()
                     );
                 }
+                let total_line_count = edit_state.line_count(WINDOW_WIDTH);
+                let first_screen_line = total_line_count.saturating_sub(10);
                 for line in 0..WINDOW_HEIGHT {
-                    let line_bytes = edit_state.read_line(line);
-                    let line_str = str::from_utf8(&line_bytes).unwrap();
-                    panic!("the first line is {line_str}");
-                    plot_str(line_str, 1, line + 1, text_color());
+                    if let Some(line_bytes) = edit_state.read_line(first_screen_line + line) {
+                        let line_str = str::from_utf8(&line_bytes).unwrap();
+                        // panic!("line_str is {line_str}");
+                        plot_str(line_str, col + 1, row + 1 + line, text_color());
+                    } else {
+                        continue
+                    }
                 }
             },
         }
@@ -502,15 +558,16 @@ impl Kernel {
     fn switch_to_edit_mode(&mut self, window: KWindows) {
         if let KWindowMode::Directory(dir_state) = self.get_window_mode(window) {
             let chosen_file = dir_state.cursor;
-            let (_, directory) = self.fs.list_directory().unwrap();
+            let (file_count, directory) = self.fs.list_directory().unwrap();
+            assert!(chosen_file < file_count);
             let filename_str = str::from_utf8(&directory[chosen_file]).unwrap();
             let file = self.fs.open_read(filename_str).unwrap();
             let mut buffer = [0u8; PRACTICAL_FILE_BUFFER_SIZE];
-            self.fs.read(file, &mut buffer).unwrap();
+            let filesize = self.fs.read(file, &mut buffer).unwrap();
             self.fs.close(file);
             self.set_window_mode(
                 window,
-                KWindowMode::editing(directory[chosen_file], buffer, chosen_file),
+                KWindowMode::editing(directory[chosen_file], buffer, filesize, chosen_file),
             );
         }
     }
@@ -519,9 +576,7 @@ impl Kernel {
         if let KWindowMode::Editing(edit_state) = self.get_window_mode(window) {
             let filename_str = str::from_utf8(&edit_state.filename).unwrap();
             let file = self.fs.open_create(filename_str).unwrap();
-            self.fs.close(file).unwrap();
-            let file = self.fs.open_create(filename_str).unwrap();
-            self.fs.write(file, &edit_state.buffer).unwrap();
+            self.fs.write(file, &edit_state.buffer[0..edit_state.len]).unwrap();
             self.fs.close(file).unwrap();
             self.set_window_mode(
                 window,
