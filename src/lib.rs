@@ -2,6 +2,7 @@
 #![feature(prelude_2024)]
 
 // TODO: use proper error handling rather than `.unwrap()` during file management
+// TODO: add edit window scrolling with F7 and F8
 
 use pc_keyboard::{DecodedKey, KeyCode};
 use pluggable_interrupt_os::vga_buffer::{BUFFER_WIDTH, BUFFER_HEIGHT, plot, ColorCode, Color, plot_str, is_drawable, plot_num};
@@ -107,6 +108,7 @@ struct EditingState {
     buffer: [u8; PRACTICAL_FILE_BUFFER_SIZE],
     len: usize,
     cursor: usize,
+    scroll: usize,
     directory_index: usize,
 }
 
@@ -153,7 +155,7 @@ impl EditingState {
         count
     }
 
-    fn read_line(&self, line: usize) -> Option<[u8; WINDOW_WIDTH]> { // TODO: fix this method
+    fn read_line(&self, line: usize) -> Option<[u8; WINDOW_WIDTH]> {
         let mut line_buf = [' ' as u8; WINDOW_WIDTH];
         let mut current_line = 0;
         let mut line_start = 0;
@@ -205,13 +207,16 @@ impl KWindowMode {
         len: usize,
         directory_index: usize,
     ) -> Self {
-        Self::Editing(EditingState {
+        let mut state = EditingState {
             filename,
             buffer,
             len,
             cursor: len,
+            scroll: 0,
             directory_index,
-        })
+        };
+        state.scroll = state.line_count(WINDOW_WIDTH).saturating_sub(WINDOW_HEIGHT);
+        Self::Editing(state)
     }
 }
 
@@ -376,6 +381,22 @@ impl Kernel {
                     self.switch_to_directory_mode(window);
                 }
             },
+            KeyCode::F7 => {
+                if let KSelection::Window(window) = self.selected {
+                    if let KWindowMode::Editing(mut edit_state) = self.get_window_mode(window) {
+                        edit_state.scroll = edit_state.scroll.saturating_sub(1);
+                        self.set_window_mode(window, KWindowMode::Editing(edit_state));
+                    }
+                }
+            },
+            KeyCode::F8 => {
+                if let KSelection::Window(window) = self.selected {
+                    if let KWindowMode::Editing(mut edit_state) = self.get_window_mode(window) {
+                        edit_state.scroll += 1;
+                        self.set_window_mode(window, KWindowMode::Editing(edit_state));
+                    }
+                }
+            },
             KeyCode::ArrowUp    => self.move_dir_cursor(-3),
             KeyCode::ArrowDown  => self.move_dir_cursor(3),
             KeyCode::ArrowLeft  => self.move_dir_cursor(-1),
@@ -477,12 +498,9 @@ impl Kernel {
                         text_color()
                     );
                 }
-                let total_line_count = edit_state.line_count(WINDOW_WIDTH);
-                let first_screen_line = total_line_count.saturating_sub(10);
                 for line in 0..WINDOW_HEIGHT {
-                    if let Some(line_bytes) = edit_state.read_line(first_screen_line + line) {
+                    if let Some(line_bytes) = edit_state.read_line(edit_state.scroll + line) {
                         let line_str = str::from_utf8(&line_bytes).unwrap();
-                        // panic!("line_str is {line_str}");
                         plot_str(line_str, col + 1, row + 1 + line, text_color());
                     } else {
                         continue
