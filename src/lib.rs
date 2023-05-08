@@ -1,13 +1,11 @@
 #![no_std]
 #![feature(prelude_2024)]
 
-// TODO: use proper error handling rather than `.unwrap()` during file management
-// TODO: add edit window scrolling with F7 and F8
-
 use pc_keyboard::{DecodedKey, KeyCode};
 use pluggable_interrupt_os::vga_buffer::{BUFFER_WIDTH, BUFFER_HEIGHT, plot, ColorCode, Color, plot_str, is_drawable, plot_num};
 use csci320_vsfs::FileSystem;
 use simple_interp::{Interpreter, InterpreterOutput, i64_into_buffer};
+use gc_headers::GarbageCollectingHeap;
 // use gc_heap::CopyingHeap;
 
 // Get rid of some spurious VSCode errors
@@ -33,6 +31,7 @@ const WINDOW_LABEL_COL_OFFSET: usize = WINDOW_WIDTH - 3;
 const FILENAME_LABEL_COL_OFFSET: usize = 2;
 
 const FILENAME_PROMPT: &str = "F5 - Filename: ";
+const EDIT_MODE_HEADER: &str = "(F6)";
 
 const MAX_OPEN: usize = 16;
 const BLOCK_SIZE: usize = 256;
@@ -88,7 +87,7 @@ impl KWindows {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct DirectoryState {
     cursor: usize,
 }
@@ -102,7 +101,7 @@ impl DirectoryState {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct EditingState {
     filename: [u8; MAX_FILENAME_BYTES],
     buffer: [u8; PRACTICAL_FILE_BUFFER_SIZE],
@@ -190,10 +189,33 @@ impl EditingState {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug)]
+struct RunningState {
+    interpreter: Interpreter<
+        MAX_TOKENS,
+        MAX_LITERAL_CHARS,
+        STACK_DEPTH,
+        MAX_LOCAL_VARS,
+        WINDOW_WIDTH,
+        DummyHeap<HEAP_SIZE, MAX_HEAP_BLOCKS>,
+    >,
+}
+
+// dummy struct, allows interpreter to compile
+#[derive(Clone, Copy, Debug)]
+struct DummyHeap<const HEAP_SIZE: usize, const MAX_HEAP_BLOCKS: usize>;
+impl GarbageCollectingHeap for DummyHeap<HEAP_SIZE, MAX_HEAP_BLOCKS> {
+    fn new() -> Self {todo!("dummy heap")}
+    fn load(&self, p: gc_headers::Pointer) -> gc_headers::HeapResult<u64> {todo!("dummy heap")}
+    fn store(&mut self, p: gc_headers::Pointer, value: u64) -> gc_headers::HeapResult<()> {todo!("dummy heap")}
+    fn malloc<T: gc_headers::Tracer>(&mut self, num_words: usize, tracer: &T) -> gc_headers::HeapResult<gc_headers::Pointer> {todo!("dummy heap")}
+}
+
+#[derive(Clone, Copy, Debug)]
 enum KWindowMode {
     Directory(DirectoryState),
     Editing(EditingState),
+    Running(RunningState),
 }
 
 impl KWindowMode {
@@ -217,6 +239,12 @@ impl KWindowMode {
         };
         state.scroll = state.line_count(WINDOW_WIDTH).saturating_sub(WINDOW_HEIGHT);
         Self::Editing(state)
+    }
+
+    fn running(program: &str) -> Self {
+        Self::Running(RunningState {
+            interpreter: Interpreter::new(program)
+        })
     }
 }
 
@@ -381,22 +409,8 @@ impl Kernel {
                     self.switch_to_directory_mode(window);
                 }
             },
-            KeyCode::F7 => {
-                if let KSelection::Window(window) = self.selected {
-                    if let KWindowMode::Editing(mut edit_state) = self.get_window_mode(window) {
-                        edit_state.scroll = edit_state.scroll.saturating_sub(1);
-                        self.set_window_mode(window, KWindowMode::Editing(edit_state));
-                    }
-                }
-            },
-            KeyCode::F8 => {
-                if let KSelection::Window(window) = self.selected {
-                    if let KWindowMode::Editing(mut edit_state) = self.get_window_mode(window) {
-                        edit_state.scroll += 1;
-                        self.set_window_mode(window, KWindowMode::Editing(edit_state));
-                    }
-                }
-            },
+            KeyCode::F7 => self.scroll_edit_text(-1),
+            KeyCode::F8 => self.scroll_edit_text(1),
             KeyCode::ArrowUp    => self.move_dir_cursor(-3),
             KeyCode::ArrowDown  => self.move_dir_cursor(3),
             KeyCode::ArrowLeft  => self.move_dir_cursor(-1),
@@ -420,17 +434,22 @@ impl Kernel {
                     KWindowMode::Directory(_) => {
                         match key {
                             'e' => self.switch_to_edit_mode(window),
+                            'r' => self.switch_to_run_mode(window),
                             _ => {},
                         }
                     },
                     KWindowMode::Editing(mut edit_state) => {
                         match key {
+                            '\n' => edit_state.type_char('\n'),
                             key if is_drawable(key) => edit_state.type_char(key),
                             '\u{8}' => edit_state.backspace(),
                             _ => {},
                         }
                         self.set_window_mode(window, KWindowMode::Editing(edit_state));
-                    }
+                    },
+                    KWindowMode::Running(_) => {
+                        todo!("handle unicode for a running window")
+                    },
                 }
             },
         }
@@ -487,13 +506,12 @@ impl Kernel {
                 }
             },
             KWindowMode::Editing(edit_state) => {
-                let header = "(F6)";
-                plot_str(header, col + FILENAME_LABEL_COL_OFFSET, row, text_color());
+                plot_str(EDIT_MODE_HEADER, col + FILENAME_LABEL_COL_OFFSET, row, text_color());
                 for i in 0..edit_state.filename.len() {
                     if edit_state.filename[i] == 0 { continue }
                     plot(
                         edit_state.filename[i] as char,
-                        col + i + header.len() + FILENAME_LABEL_COL_OFFSET,
+                        col + i + EDIT_MODE_HEADER.len() + FILENAME_LABEL_COL_OFFSET,
                         row,
                         text_color()
                     );
@@ -506,6 +524,9 @@ impl Kernel {
                         continue
                     }
                 }
+            },
+            KWindowMode::Running(_) => {
+                todo!("draw a running window")
             },
         }
     }
@@ -574,6 +595,19 @@ impl Kernel {
         }
     }
 
+    fn scroll_edit_text(&mut self, delta: isize) {
+        if let KSelection::Window(window) = self.selected {
+            if let KWindowMode::Editing(mut edit_state) = self.get_window_mode(window) {
+                edit_state.scroll = edit_state.scroll.saturating_add_signed(delta);
+                let line_count = edit_state.line_count(WINDOW_WIDTH);
+                if edit_state.scroll >= line_count {
+                    edit_state.scroll = line_count - 1;
+                }
+                self.set_window_mode(window, KWindowMode::Editing(edit_state));
+            }
+        }
+    }
+
     fn switch_to_edit_mode(&mut self, window: KWindows) {
         if let KWindowMode::Directory(dir_state) = self.get_window_mode(window) {
             let chosen_file = dir_state.cursor;
@@ -600,6 +634,24 @@ impl Kernel {
             self.set_window_mode(
                 window,
                 KWindowMode::directory(edit_state.directory_index),
+            );
+        }
+    }
+
+    fn switch_to_run_mode(&mut self, window:KWindows) {
+        if let KWindowMode::Directory(dir_state) = self.get_window_mode(window) {
+            let chosen_file = dir_state.cursor;
+            let (file_count, directory) = self.fs.list_directory().unwrap();
+            assert!(chosen_file < file_count);
+            let filename_str = str::from_utf8(&directory[chosen_file]).unwrap();
+            let file = self.fs.open_read(filename_str).unwrap();
+            let mut buffer = [0u8; PRACTICAL_FILE_BUFFER_SIZE];
+            let filesize = self.fs.read(file, &mut buffer).unwrap();
+            self.fs.close(file);
+            let program = str::from_utf8(&buffer[..filesize]).unwrap();
+            self.set_window_mode(
+                window,
+                KWindowMode::running(program),
             );
         }
     }
